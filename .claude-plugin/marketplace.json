@@ -1,5 +1,6 @@
 {
-  "name": "robonuggets",
+  "name": "local-mods",
+  "description": "Local copies of mods with my own changes.",
   "owner": { "name": "Jay E", "url": "https://robonuggets.com" },
   "plugins": [
     {

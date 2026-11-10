@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { CacheFacts, Fold, Window } from '../types'
 import {
-  BG, EMPTY, HUE, INK, MUTED, ORANGE, ROBO_SIZE, TEXT, TTL_MIN, TTL_MS, WORD, YELLOW,
+  EMPTY, HUE, INK, MUTED, ORANGE, ROBO_SIZE, TEXT, TTL_MIN, TTL_MS, WORD, YELLOW,
   bandPx, cardSvg, chipSvg, costOf, familyOf, fmtIdle, kindOf, mineModel, roboSvg, usd,
 } from './cache-art'
 import type { CacheView } from './cache-art'
@@ -17,12 +17,21 @@ import type { CacheView } from './cache-art'
 // next message costs to re-cache. Hide / Show folds the card; warm starts folded,
 // cold starts open, and a choice holds until the cache flips. Zero token cost:
 // it reads the engine's own figures and draws.
+//
+// With cache-tax installed it also carries that mod's keep-warm switch: one button,
+// on or off for every session, on by default. A keep-warm ping that really read the
+// cache starts the hour again here too, so the band and cache-tax agree.
 
 const CELLS = 10
 const LOW_AT = 15
 const TIGHT_CELLS = 6
 /** How often the band redraws, so the countdown and the warm-to-cold flip stay current. */
 const TICK_MS = 30_000
+/** cache-tax's command, and the key this band remembers the switch under, for every session. */
+const KEEPWARM = 'keepwarm'
+const KEEP_KEY = 'keep'
+/** cache-tax registers its command in its own session.start, which may run after this one. */
+const FIRST_RUN_DELAY_MS = 3000
 
 const windows = atom({ plugin: 'ribbon', key: 'windows' } as const, [] as Window[])
 const cache = atom({ plugin: 'ribbon', key: 'cache' } as const, null as CacheFacts | null)
@@ -52,6 +61,20 @@ const fmtReset = (iso: string | undefined, now: number): string => {
   const hours = Math.floor(mins / 60)
   if (hours < 24) return `${hours}h ${mins % 60}m`
   return `${Math.floor(hours / 24)}d ${hours % 24}h`
+}
+
+/** The cache figures of one keep-warm ping, as the model reports them. */
+export type PingUsage = { cache_read_input_tokens: number; cache_creation_input_tokens: number }
+
+/**
+ * Whether a ping's usage shows the prompt cache was still alive: it read the
+ * prefix from the cache and wrote next to nothing. Only then does the band start
+ * its hour again; a ping that paid to write the prefix found the cache gone.
+ */
+export const pingKeptCacheWarm = (usage: PingUsage | null | undefined): boolean => {
+  if (!usage) return false
+  // The same rule cache-tax scores its own pings by: a write of a tenth of the read or more means the prefix broke.
+  return usage.cache_read_input_tokens > 0 && usage.cache_creation_input_tokens < 0.1 * usage.cache_read_input_tokens
 }
 
 /** What the cache drawings read, or null until a request and its context size are known. */
@@ -85,11 +108,58 @@ const measure = async ($: EngineInterface, lastAt: number | null, model: string 
   }))
 }
 
+/** The switch as saved: on, off, or null when cache-tax is not there to switch. */
+const keepState = async ($: EngineInterface): Promise<boolean | null> => {
+  try {
+    if (!(await $.command.list()).some(c => c.name === KEEPWARM)) return null
+    return (await $.store.get(KEEP_KEY)) === true
+  } catch {
+    return null
+  }
+}
+
+/** Saves the switch and tells cache-tax: always keeps every session warm, off stops it for good. */
+const setKeep = async ($: EngineInterface, isOn: boolean): Promise<void> => {
+  await $.store.set(KEEP_KEY, isOn)
+  $.ui.invalidate('ui.render')
+  // Not awaited: a command run from inside a hook the turn waits on can hang.
+  void Promise.resolve($.command.run({ command: KEEPWARM, args: isOn ? 'always' : 'off' })).catch(() => {})
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await pull($)
     $.clock.every(TICK_MS, () => $.ui.invalidate('ui.render'))
+    // The first session ever: keep-warm starts on. After that the saved choice stands.
+    $.clock.after(FIRST_RUN_DELAY_MS, async () => {
+      try {
+        if (typeof (await $.store.get(KEEP_KEY)) === 'boolean') return
+        if ((await keepState($)) !== null) await setKeep($, true)
+      } catch { /* a band that cannot read its switch still draws */ }
+    })
     return next(e)
+  })
+
+  // A typed /keepwarm always or off moves the switch too. cache-tax answers the command beneath.
+  on('command.run', { command: KEEPWARM }, async ($, e, next) => {
+    const word = String(e.args ?? '').trim().split(/\s+/)[0]
+    if (word === 'always' || word === 'off') {
+      await $.store.set(KEEP_KEY, word === 'always')
+      $.ui.invalidate('ui.render')
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // A keep-warm ping is a fork of the main thread's last request. One that read the cache
+  // kept it alive, so the hour starts again from when it was sent.
+  on('model.fork', async ($, e, next) => {
+    const sentAt = await $.clock.now()
+    const r = await next(e)
+    const reply = r && typeof r === 'object' && 'value' in r ? r.value : r
+    if (reply && reply.isAnswered !== false && pingKeptCacheWarm(reply.usage)) {
+      await update($, cache, c => (c ? { ...c, lastAt: sentAt } : c))
+    }
+    return r
   })
 
   on('session.measure', async ($, e, next) => {
@@ -152,10 +222,20 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const view = viewOf(await read($, cache), now)
 
+    const keep = await keepState($)
+    const keepButton = keep === null ? null : (
+      <Box key="keep" flexShrink={0} alignItems="flex-start" marginLeft={1}>
+        <Button key="keep-warm" label={keep ? 'Keep warm: on' : 'Keep warm: off'} onPress={() => setKeep($, !keep)} />
+      </Box>
+    )
+    const grow = <Box key="grow" flexGrow={1} />
+
     if (list.length === 0 && !view) {
       return (
-        <Box backgroundColor={BG} paddingX={1}>
+        <Box flexDirection="row" paddingX={1}>
           <Text color={MUTED}>USAGE · waiting for the first reply</Text>
+          {grow}
+          {keepButton}
         </Box>
       )
     }
@@ -222,9 +302,11 @@ export const register: Register = on => {
     // Before the first reply there is no cache to show: today's band, as it was.
     if (!view) {
       return (
-        <Box flexDirection="row" backgroundColor={BG} paddingX={1}>
+        <Box flexDirection="row" paddingX={1}>
           {label}
           {usage}
+          {grow}
+          {keepButton}
         </Box>
       )
     }
@@ -263,8 +345,6 @@ export const register: Register = on => {
         <Button key="cache-fold" label={open ? 'Hide' : 'Show'} onPress={toggle} />
       </Box>
     ) : null
-    const grow = <Box key="grow" flexGrow={1} />
-
     let rows
     if (kind === 'wide') {
       rows = (
@@ -279,6 +359,7 @@ export const register: Register = on => {
           )}
           {grow}
           {button}
+          {keepButton}
         </Box>
       )
     } else if (kind === 'stacked') {
@@ -301,6 +382,7 @@ export const register: Register = on => {
           )}
           {grow}
           {button}
+          {keepButton}
         </Box>
       )
     } else {
@@ -315,6 +397,7 @@ export const register: Register = on => {
           {summary}
           {grow}
           {button}
+          {keepButton}
         </Box>,
       ]
     }
@@ -330,7 +413,7 @@ export const register: Register = on => {
     }
 
     return (
-      <Box flexDirection="column" backgroundColor={BG}>
+      <Box flexDirection="column">
         {rows}
         {card}
       </Box>
