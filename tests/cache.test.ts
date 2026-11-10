@@ -31,11 +31,11 @@ test('a warm cache shows Robo, the WARM chip and the minutes left, folded', asyn
   expect(alts).toEqual(['Robo, bobbing', 'WARM'])
   expect(await band.find({ text: ' 42m left' })).toBeDefined()
   expect(await band.find({ key: 'card' })).toBeUndefined()
-  expect((await band.find({ key: 'cache-fold' }))?.props.label).toBe('▾')
+  expect((await band.find({ key: 'cache-fold' }))?.props.label).toBe('+')
 
   await band.press({ key: 'cache-fold' })
   expect(await band.find({ key: 'card' })).toBeDefined()
-  expect((await band.find({ key: 'cache-fold' }))?.props.label).toBe('▴')
+  expect((await band.find({ key: 'cache-fold' }))?.props.label).toBe('−')
   await band.unmount()
 })
 

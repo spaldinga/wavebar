@@ -565,7 +565,7 @@ export const register: Register = on => {
 
     const button = Svg ? (
       <Box key="fold" flexShrink={0} alignItems="flex-start">
-        <Button key="cache-fold" label={open ? '▴' : '▾'} onPress={toggle} />
+        <Button key="cache-fold" label={open ? '−' : '+'} onPress={toggle} />
       </Box>
     ) : null
     // The wide row's spare room, counted in columns from what the row says: the bar goes there when it fits.
