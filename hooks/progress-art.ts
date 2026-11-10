@@ -1,17 +1,22 @@
 import { EMPTY, MUTED, ORANGE, YELLOW, roboShapes, svgDoc } from './cache-art'
 
-// The progress drawings: a track with Robo riding it like a slider's thumb. Left of
+// The progress drawings: a line with Robo surfing along the top of it on a board. Left of
 // Robo is the way come, in the band's orange running to yellow; marks stand where
 // one step ends and the next begins. With no list to measure against, Robo paces
-// the track instead. The track runs through the middle of the box, so it sits on
-// the same line as the text beside it, and starts at the box's left edge, so a bar
-// on a row of its own lines up with the row above.
+// the track instead. The line runs low in the box, leaving Robo the room above it,
+// and starts at the box's left edge, so a bar on a row of its own lines up with the
+// row above.
 
 export const BAR_H = 26
-const ROBO = 20
+const ROBO = 18
+/** The board Robo stands on: it rides the top of the line, nose up, in the direction of travel. */
+const BOARD_W = 24
+const BOARD_H = 3
+const LEAN_DEG = -7
 const TRACK_H = 4
-const TRACK_Y = (BAR_H - TRACK_H) / 2
-const ROBO_Y = (BAR_H - ROBO) / 2
+const TRACK_Y = BAR_H - TRACK_H - 2
+/** Robo's feet come at about 0.94 of its box, and they stand on the board. */
+const ROBO_Y = TRACK_Y - BOARD_H - ROBO * 0.94 + 0.5
 /** Room at the right end for the goal's ring. */
 const GOAL_R = 3.5
 const END_PAD = GOAL_R + 1.5
@@ -30,7 +35,24 @@ const track = (x0: number, x1: number): string =>
   `<rect x="${x0}" y="${TRACK_Y}" width="${x1 - x0}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="${EMPTY}"/>`
 
 /** Robo's box stays inside the drawing at both ends of the track. */
-const roboX = (at: number, W: number): number => Math.max(0, Math.min(W - ROBO, at - ROBO / 2))
+const surferX = (at: number, W: number): number => Math.max(0, Math.min(W - BOARD_W - 2, at - BOARD_W / 2))
+
+/** Robo on the board, the board's tail at x: leaning back a little, with spray off the tail. SMIL only. */
+const surfer = (x: number): string => {
+  const top = TRACK_Y - BOARD_H
+  const cx = x + BOARD_W / 2
+  const board =
+    `<path d="M${x} ${TRACK_Y} Q${x + 1} ${top} ${x + 6} ${top} H${x + BOARD_W - 4} Q${x + BOARD_W} ${top} ${x + BOARD_W + 2} ${top - 1.5} ` +
+    `Q${x + BOARD_W} ${TRACK_Y} ${x + BOARD_W - 5} ${TRACK_Y} Z" fill="${YELLOW}"/>`
+  const spray = [0, 1]
+    .map(
+      i =>
+        `<circle cx="${x - 1 - i * 3}" cy="${TRACK_Y - 1 - i * 2}" r="${1.1 - i * 0.3}" fill="${YELLOW}">` +
+        `<animate attributeName="opacity" values="0;.9;0" dur="0.9s" begin="${i * 0.3}s" repeatCount="indefinite"/></circle>`,
+    )
+    .join('')
+  return `<g transform="rotate(${LEAN_DEG} ${cx} ${TRACK_Y})">` + spray + board + roboShapes(cx - ROBO / 2, ROBO_Y, ROBO, 'warm') + '</g>'
+}
 
 /** Robo at `ratio` of the way along a track `W` pixels wide, with a mark between each of `steps` steps. */
 export const walkSvg = (ratio: number, steps: number, W: number, isFinished: boolean): string => {
@@ -47,8 +69,8 @@ export const walkSvg = (ratio: number, steps: number, W: number, isFinished: boo
     }
   }
   // The goal: a ring, filled once reached.
-  g += `<circle cx="${x1}" cy="${BAR_H / 2}" r="${GOAL_R}" fill="${isFinished ? YELLOW : 'none'}" stroke="${YELLOW}" stroke-width="1.5"/>`
-  g += roboShapes(roboX(at, W), ROBO_Y, ROBO, 'warm')
+  g += `<circle cx="${x1}" cy="${TRACK_Y + TRACK_H / 2}" r="${GOAL_R}" fill="${isFinished ? YELLOW : 'none'}" stroke="${YELLOW}" stroke-width="1.5"/>`
+  g += surfer(surferX(at, W))
   return svgDoc(W, BAR_H, g, false)
 }
 
@@ -67,7 +89,7 @@ export const paceSvg = (W: number): string => {
       `<rect x="${x0}" y="${TRACK_Y}" width="${PACE_W}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="url(#way)">` +
       `<animate attributeName="x" values="${x0};${x0 + span};${x0}" ${dur} ${ease}/></rect>` +
       `<g><animateTransform attributeName="transform" type="translate" values="0 0;${span} 0;0 0" ${dur} ${ease}/>` +
-      roboShapes(x0 + PACE_W / 2 - ROBO / 2, ROBO_Y, ROBO, 'warm') +
+      surfer(x0 + PACE_W / 2 - BOARD_W / 2) +
       '</g>',
     false,
   )

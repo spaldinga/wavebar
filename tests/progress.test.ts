@@ -256,7 +256,7 @@ test('the bar starts at the left edge and keeps Robo inside the drawing at both 
 
   for (const ratio of [0, 1]) {
     const s = walkSvg(ratio, 3, 200, ratio === 1)
-    expect(s).toContain('<rect x="0" y="11" width="195"')
+    expect(s).toContain('<rect x="0" y="20" width="195"')
     expect(s).not.toMatch(/translate\(-/)
   }
 })
