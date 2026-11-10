@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CacheFacts, Ending, Fold, Progress, Turn, Window, Worker } from '../types'
+import type { CacheFacts, Ending, Fold, Progress, Spend, Turn, Window, Worker } from '../types'
 import { LIST_TOOLS, REPORT_TOOL, afterListCall, afterReport, barText, labelOf, pulseText, ratioOf } from './progress'
 import { BAR_H, crewSvg, paceSvg, walkSvg } from './progress-art'
 import {
   EMPTY, HUE, INK, MUTED, ORANGE, ROBO_SIZE, TEXT, TTL_MIN, TTL_MS, WORD, YELLOW,
-  bandPx, cardSvg, chipSvg, costOf, familyOf, fmtIdle, kindOf, mineModel, roboSvg, usd,
+  bandPx, cardSvg, chipSvg, costOf, familyOf, fmtIdle, kindOf, mineModel, roboSvg, turnCost, usd,
 } from './cache-art'
 import type { CacheView } from './cache-art'
 
@@ -42,6 +42,12 @@ const progress = atom({ plugin: 'ribbon', key: 'progress' } as const, null as Pr
 const turn = atom({ plugin: 'ribbon', key: 'turn' } as const, null as Turn | null)
 const crew = atom({ plugin: 'ribbon', key: 'crew' } as const, [] as Worker[])
 const ending = atom({ plugin: 'ribbon', key: 'ending' } as const, null as Ending)
+const spend = atom({ plugin: 'ribbon', key: 'spend' } as const, { main: 0, subs: 0 } as Spend)
+
+/** The conversation's cost as one line for the transcript, so a debrief can quote it instead of leaving cost empty. */
+export const spendLine = (s: Spend): string =>
+  `this conversation has cost about ${usd(s.main + s.subs)} so far (main session ${usd(s.main)}, subagents ${usd(s.subs)}). ` +
+  'An estimate from token counts at list prices, since this session started or was last resumed; not a bill.'
 
 /** The skill a wrap-up runs, and the window it leaves keep-warm: too short for a ping, so this conversation stops being held. */
 const DEBRIEF = 'debrief'
@@ -306,11 +312,15 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    // What the turn used, at list prices, onto the conversation's running cost.
+    const paid = turnCost(e.usage) ?? 0
     if (e.agentId) {
       const id = e.agentId
       await update($, crew, list => list.map(w => (w.id === id ? { ...w, isDone: true } : w)))
+      if (paid > 0) await update($, spend, s => ({ ...s, subs: s.subs + paid }))
       return r
     }
+    if (paid > 0) await update($, spend, s => ({ ...s, main: s.main + paid }))
     if ((await read($, ending)) === 'running') {
       await update($, ending, () => null)
       // The debrief is in: stop holding this conversation's cache. The switch stays on for the next one.
@@ -352,6 +362,9 @@ export const register: Register = on => {
           onPress={async () => {
             if ((await read($, ending)) !== null) return
             await update($, ending, () => 'asked' as const)
+            // Into the transcript first, so the debrief has the figure to quote.
+            const s = await read($, spend)
+            if (s.main + s.subs > 0) void Promise.resolve($.ui.log(spendLine(s))).catch(() => {})
             fire($, DEBRIEF, '')
           }}
         />
@@ -490,9 +503,21 @@ export const register: Register = on => {
         <Text color={TEXT} bold>USAGE</Text>
       </Box>
     )
-    const usage = list.length > 0
-      ? list.map(isWide ? wide : stacked)
-      : [<Box key="wait" flexShrink={0} marginRight={3}><Text color={MUTED}>waiting for the first reply</Text></Box>]
+    // What the conversation has cost so far, once a turn has reported its usage.
+    const paid = await read($, spend)
+    const total = paid.main + paid.subs
+    const spendBox = total <= 0 ? null : (
+      <Box key="spend" flexDirection={isWide ? 'row' : 'column'} flexShrink={0} marginRight={3}>
+        <Text color={MUTED} bold>{isWide ? 'COST ' : 'COST'}</Text>
+        <Text key="spend-total" color={TEXT} bold>{`≈${usd(total)}`}</Text>
+      </Box>
+    )
+    const usage = [
+      ...(list.length > 0
+        ? list.map(isWide ? wide : stacked)
+        : [<Box key="wait" flexShrink={0} marginRight={3}><Text color={MUTED}>waiting for the first reply</Text></Box>]),
+      spendBox,
+    ]
 
     // Before the first reply there is no cache to show: today's band, as it was.
     if (!view) {
@@ -554,6 +579,7 @@ export const register: Register = on => {
       (Svg ? 5 : 0) +
       (keep === null ? 0 : 17) +
       (wrapButton ? 15 : 0) +
+      (spendBox ? 9 + usd(total).length : 0) +
       2
     const freeCols = columns - usedCols - words.length
     const progressInline = isWide && freeCols >= INLINE_MIN_COLS ? progressOf('progress', freeCols * COL_PX, BAR_MAX_PX) : null

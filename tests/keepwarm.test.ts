@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, Plugin } from 'claude-code'
 
+import { turnCost, usd } from '../hooks/cache-art'
 import { pingKeptCacheWarm } from '../hooks/register'
 
 /** The brown the band used to paint behind itself. */
@@ -270,5 +271,55 @@ test('without the debrief skill there is no Wrap up button', async ($, on) => {
   await seed($, 18)
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await band.find({ key: 'wrap-up' })).toBeUndefined()
+  await band.unmount()
+})
+
+const USED = { model: 'claude-opus-5-5', input_tokens: 1e6, output_tokens: 1e6, cache_read_input_tokens: 2e6, cache_creation_input_tokens: 1e6 }
+const done = ($: Parameters<Parameters<typeof test>[1]>[0], extra: object) =>
+  ($.turn.complete as (e: unknown) => Promise<unknown>)({ reason: 'answer', answer: 'ok', durationMs: 1000, ...extra })
+
+test('a turn is priced at list prices, with cache writes at the 1-hour rate', () => {
+  // Opus 5.5: 4 in + 20 out + 2 x 0.20 read + 8 write, per million.
+  expect(usd(turnCost(USED) ?? -1)).toBe(usd(32.4))
+  expect(usd(turnCost({ ...USED, model: 'claude-haiku-5-5' }) ?? -1)).toBe(usd(0.5 + 2.5 + 0.1 + 1))
+  // The turn's model wins; the fallback prices a turn that names none.
+  expect(usd(turnCost({ ...USED, model: null }, 'claude-sonnet-5-5') ?? -1)).toBe(usd(2 + 10 + 0.4 + 4))
+  expect(turnCost({ ...USED, model: 'some-other-model' })).toBe(null)
+  expect(turnCost(null)).toBe(null)
+})
+
+test("the band adds up the conversation's cost, the main session's and its subagents'", async ($, on) => {
+  mock.clock(on, { now: NOW })
+  engine(on, { keep: true })
+  await seed($, 18)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await band.find({ key: 'spend' })).toBeUndefined()
+
+  await done($, { usage: USED })
+  expect(await band.find({ text: '≈$32.40' })).toBeDefined()
+  await done($, { usage: { ...USED, model: 'claude-haiku-5-5' }, agentId: 'sub1' })
+  expect(await band.find({ text: '≈$36.50' })).toBeDefined()
+  // A turn that reports no usage, or a model the table does not price, adds nothing.
+  await done($, { usage: null })
+  await done($, { usage: { ...USED, model: 'some-other-model' } })
+  expect(await band.find({ text: '≈$36.50' })).toBeDefined()
+  await band.unmount()
+})
+
+test('Wrap up puts the cost in the transcript before the debrief runs', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { ran } = engine(on, { keep: true, commands: ['keepwarm', 'debrief'] })
+  const logs: string[] = []
+  on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
+  await seed($, 18)
+  await done($, { usage: USED })
+  await done($, { usage: { ...USED, model: 'claude-haiku-5-5' }, agentId: 'sub1' })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'wrap-up' })
+  expect(logs).toEqual([
+    'this conversation has cost about $36.50 so far (main session $32.40, subagents $4.10). ' +
+      'An estimate from token counts at list prices, since this session started or was last resumed; not a bill.',
+  ])
+  expect(ran).toEqual(['debrief'])
   await band.unmount()
 })

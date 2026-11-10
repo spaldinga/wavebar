@@ -29,6 +29,9 @@ export type Turn = { startedAt: number; steps: number }
 /** One subagent of the main session: what kind it is, how many requests it has made, whether it is finished. */
 export type Worker = { id: string; type: string; steps: number; isDone: boolean }
 
+/** What this conversation has cost so far at list prices, in dollars: the main session's turns and its subagents'. */
+export type Spend = { main: number; subs: number }
+
 /** Wrapping up a conversation: asked for by the button, then running once the debrief's turn has started. */
 export type Ending = 'asked' | 'running' | null
 
@@ -42,6 +45,7 @@ declare module 'claude-code' {
       turn: Turn | null
       crew: Worker[]
       ending: Ending
+      spend: Spend
     }
   }
 }
