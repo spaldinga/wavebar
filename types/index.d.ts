@@ -26,8 +26,22 @@ export type Progress = { steps: Step[]; done: number; total: number; note: strin
 /** The turn in flight: when its first request went out and how many requests it has made. */
 export type Turn = { startedAt: number; steps: number }
 
+/** One subagent of the main session: what kind it is, how many requests it has made, whether it is finished. */
+export type Worker = { id: string; type: string; steps: number; isDone: boolean }
+
+/** Wrapping up a conversation: asked for by the button, then running once the debrief's turn has started. */
+export type Ending = 'asked' | 'running' | null
+
 declare module 'claude-code' {
   interface PluginState {
-    'ribbon': { windows: Window[]; cache: CacheFacts | null; fold: Fold | null; progress: Progress | null; turn: Turn | null }
+    'ribbon': {
+      windows: Window[]
+      cache: CacheFacts | null
+      fold: Fold | null
+      progress: Progress | null
+      turn: Turn | null
+      crew: Worker[]
+      ending: Ending
+    }
   }
 }

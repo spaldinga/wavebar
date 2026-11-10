@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { afterListCall, afterReport, fromSteps, pulseText, ratioOf } from '../hooks/progress'
+import { walkSvg } from '../hooks/progress-art'
 
 const NOW = Date.parse('2098-12-31T22:00:00Z')
 const PLAN = 'mcp__ccd_turn__update_plan'
@@ -62,6 +63,12 @@ test('advance, done and start move the list the way the plan tool does', () => {
   p = afterListCall(p, PLAN, { advance: true })
   expect(p).toMatchObject({ done: 4, total: 4, hasCurrent: false, isFinished: true })
   expect(ratioOf(p!)).toBe(1)
+})
+
+test("the app's wrap-up checks off what is left of the list, and makes none of its own", () => {
+  const p = afterListCall(afterListCall(null, PLAN, { items: ITEMS }), 'mcp__ccd_turn__wrap_up', { recap: 'Done.' })
+  expect(p).toMatchObject({ done: 4, total: 4, isFinished: true })
+  expect(afterListCall(null, 'mcp__ccd_turn__wrap_up', { recap: 'Done.' })).toBe(null)
 })
 
 test('the terminal task tools build the same list', () => {
@@ -199,4 +206,57 @@ test('a narrow band gives the bar a row of its own', async ($, on) => {
   expect(await band.find({ key: 'progress-row' })).toBeDefined()
   expect(await band.find({ text: ' 1/4' })).toBeDefined()
   await band.unmount()
+})
+
+const spawn = (type: string) =>
+  ({ tool_use_id: `t-${type}`, prompt: 'p', description: `${type} work`, subagentType: type, provider: 'engine', parentModel: 'claude-opus-5-5', background: false, fork: false })
+
+const subStep = async ($: T$, agentId: string, index: number) => {
+  const stream = ($.turn.step as (e: unknown) => AsyncIterable<unknown>)({ turnId: `sub-${agentId}`, index, model: 'claude-sonnet-5-5', messageCount: 1, agentId })
+  for await (const c of stream) void c
+}
+
+test('running subagents stand beside the bar with their kind and requests, and leave when done', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  engine(on)
+  on('agent.spawn', ($, e) => ({ model: 'claude-sonnet-5-5', agentId: `a-${e.subagentType}` }))
+  await start($)
+  await step($, 0)
+  await $.agent.spawn(spawn('Explore') as never)
+  await $.agent.spawn(spawn('sonnet-coder') as never)
+  await subStep($, 'a-Explore', 0)
+  await subStep($, 'a-Explore', 1)
+  await subStep($, 'a-sonnet-coder', 0)
+
+  const band = await $.ui.mount({ plugin: 'ribbon', surface: 'desktop', component: 'AbovePrompt', props: props(true) })
+  const alts = async () => (await band.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
+  expect(await alts()).toContain('2 subagents working')
+  expect(await band.find({ text: ' ×2' })).toBeDefined()
+  expect(await band.find({ text: ' Explore 2, sonnet-coder 1' })).toBeDefined()
+
+  await ($.turn.complete as (e: unknown) => Promise<unknown>)({ agentId: 'a-Explore', reason: 'answer', answer: 'ok', usage: null, durationMs: 10 })
+  expect(await alts()).toContain('1 subagent working')
+  expect(await band.find({ text: ' sonnet-coder 1' })).toBeDefined()
+  await band.unmount()
+})
+
+test('a background subagent still shows after the main turn has stopped working', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  engine(on)
+  on('agent.spawn', ($, e) => ({ model: 'claude-sonnet-5-5', agentId: `a-${e.subagentType}` }))
+  await start($)
+  await $.agent.spawn(spawn('Explore') as never)
+  const band = await $.ui.mount({ plugin: 'ribbon', surface: 'terminal', component: 'AbovePrompt', props: props(false, 100) })
+  expect(await band.find({ text: ' ×1' })).toBeDefined()
+  expect(await band.find({ text: ' Explore 0' })).toBeDefined()
+  await band.unmount()
+})
+
+test('the bar starts at the left edge and keeps Robo inside the drawing at both ends', async () => {
+
+  for (const ratio of [0, 1]) {
+    const s = walkSvg(ratio, 3, 200, ratio === 1)
+    expect(s).toContain('<rect x="0" y="11" width="195"')
+    expect(s).not.toMatch(/translate\(-/)
+  }
 })

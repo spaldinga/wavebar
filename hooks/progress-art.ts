@@ -1,17 +1,26 @@
 import { EMPTY, MUTED, ORANGE, YELLOW, roboShapes, svgDoc } from './cache-art'
 
-// The progress drawings: a track Robo walks along. Left of Robo is the way come,
-// in the band's orange running to yellow; marks stand where one step ends and the
-// next begins. With no list to measure against, Robo paces the track instead.
+// The progress drawings: a track with Robo riding it like a slider's thumb. Left of
+// Robo is the way come, in the band's orange running to yellow; marks stand where
+// one step ends and the next begins. With no list to measure against, Robo paces
+// the track instead. The track runs through the middle of the box, so it sits on
+// the same line as the text beside it, and starts at the box's left edge, so a bar
+// on a row of its own lines up with the row above.
 
 export const BAR_H = 26
 const ROBO = 20
 const TRACK_H = 4
-const TRACK_Y = BAR_H - TRACK_H - 1
-const ROBO_Y = TRACK_Y - ROBO + 2
+const TRACK_Y = (BAR_H - TRACK_H) / 2
+const ROBO_Y = (BAR_H - ROBO) / 2
+/** Room at the right end for the goal's ring. */
+const GOAL_R = 3.5
+const END_PAD = GOAL_R + 1.5
 /** Above this many steps the marks would run together, so none are drawn. */
 const MAX_MARKS = 24
 const PACE_W = 44
+/** A subagent's Robo in the crew, and the step from one to the next. */
+const CREW_ROBO = 16
+const CREW_STEP = 18
 
 const GRADIENT =
   `<defs><linearGradient id="way" x1="0" x2="1" y1="0" y2="0">` +
@@ -20,10 +29,13 @@ const GRADIENT =
 const track = (x0: number, x1: number): string =>
   `<rect x="${x0}" y="${TRACK_Y}" width="${x1 - x0}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="${EMPTY}"/>`
 
+/** Robo's box stays inside the drawing at both ends of the track. */
+const roboX = (at: number, W: number): number => Math.max(0, Math.min(W - ROBO, at - ROBO / 2))
+
 /** Robo at `ratio` of the way along a track `W` pixels wide, with a mark between each of `steps` steps. */
 export const walkSvg = (ratio: number, steps: number, W: number, isFinished: boolean): string => {
-  const x0 = ROBO / 2
-  const x1 = W - ROBO / 2
+  const x0 = 0
+  const x1 = W - END_PAD
   const at = x0 + (x1 - x0) * Math.max(0, Math.min(1, ratio))
   let g = GRADIENT + track(x0, x1)
   if (at > x0) g += `<rect x="${x0}" y="${TRACK_Y}" width="${at - x0}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="url(#way)"/>`
@@ -35,15 +47,15 @@ export const walkSvg = (ratio: number, steps: number, W: number, isFinished: boo
     }
   }
   // The goal: a ring, filled once reached.
-  g += `<circle cx="${x1}" cy="${TRACK_Y + TRACK_H / 2}" r="3.5" fill="${isFinished ? YELLOW : 'none'}" stroke="${YELLOW}" stroke-width="1.5"/>`
-  g += roboShapes(at - ROBO / 2, ROBO_Y, ROBO, 'warm')
+  g += `<circle cx="${x1}" cy="${BAR_H / 2}" r="${GOAL_R}" fill="${isFinished ? YELLOW : 'none'}" stroke="${YELLOW}" stroke-width="1.5"/>`
+  g += roboShapes(roboX(at, W), ROBO_Y, ROBO, 'warm')
   return svgDoc(W, BAR_H, g, false)
 }
 
 /** No list, so no distance: a lit stretch and Robo pace the track end to end. SMIL only, so the Svg needs isInteractive. */
 export const paceSvg = (W: number): string => {
-  const x0 = ROBO / 2
-  const x1 = W - ROBO / 2
+  const x0 = 0
+  const x1 = W - END_PAD
   const span = Math.max(0, x1 - x0 - PACE_W)
   const ease = 'calcMode="spline" keyTimes="0;0.5;1" keySplines=".45 0 .55 1;.45 0 .55 1"'
   const dur = 'dur="3.2s" repeatCount="indefinite"'
@@ -59,4 +71,13 @@ export const paceSvg = (W: number): string => {
       '</g>',
     false,
   )
+}
+
+/** The subagents at work: one small Robo a head, side by side. */
+export const crewSvg = (heads: number): { source: string; w: number } => {
+  const n = Math.max(1, heads)
+  const w = CREW_ROBO + (n - 1) * CREW_STEP
+  let g = ''
+  for (let i = 0; i < n; i++) g += roboShapes(i * CREW_STEP, (BAR_H - CREW_ROBO) / 2, CREW_ROBO, 'warm')
+  return { source: svgDoc(w, BAR_H, g, false), w }
 }

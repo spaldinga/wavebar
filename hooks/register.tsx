@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CacheFacts, Fold, Progress, Turn, Window } from '../types'
+import type { CacheFacts, Ending, Fold, Progress, Turn, Window, Worker } from '../types'
 import { LIST_TOOLS, REPORT_TOOL, afterListCall, afterReport, barText, labelOf, pulseText, ratioOf } from './progress'
-import { BAR_H, paceSvg, walkSvg } from './progress-art'
+import { BAR_H, crewSvg, paceSvg, walkSvg } from './progress-art'
 import {
   EMPTY, HUE, INK, MUTED, ORANGE, ROBO_SIZE, TEXT, TTL_MIN, TTL_MS, WORD, YELLOW,
   bandPx, cardSvg, chipSvg, costOf, familyOf, fmtIdle, kindOf, mineModel, roboSvg, usd,
@@ -40,6 +40,16 @@ const cache = atom({ plugin: 'ribbon', key: 'cache' } as const, null as CacheFac
 const fold = atom({ plugin: 'ribbon', key: 'fold' } as const, null as Fold | null)
 const progress = atom({ plugin: 'ribbon', key: 'progress' } as const, null as Progress | null)
 const turn = atom({ plugin: 'ribbon', key: 'turn' } as const, null as Turn | null)
+const crew = atom({ plugin: 'ribbon', key: 'crew' } as const, [] as Worker[])
+const ending = atom({ plugin: 'ribbon', key: 'ending' } as const, null as Ending)
+
+/** The skill a wrap-up runs, and the window it leaves keep-warm: too short for a ping, so this conversation stops being held. */
+const DEBRIEF = 'debrief'
+const WRAP_WINDOW = '1m'
+/** cache-tax re-arms its window when a turn completes; the wrap-up's short one goes in after that. */
+const WRAP_DELAY_MS = 2000
+const CREW_MAX = 40
+const CREW_SHOWN = 5
 
 /** The step's name beside the bar is cut to this, so the bar keeps its room. */
 const NOTE_MAX = 32
@@ -121,22 +131,41 @@ const measure = async ($: EngineInterface, lastAt: number | null, model: string 
   }))
 }
 
+/** Whether a slash command of that name is there to run. */
+const hasCommand = async ($: EngineInterface, name: string): Promise<boolean> => {
+  try {
+    return (await $.command.list()).some(c => c.name === name)
+  } catch {
+    return false
+  }
+}
+
 /** The switch as saved: on, off, or null when cache-tax is not there to switch. */
 const keepState = async ($: EngineInterface): Promise<boolean | null> => {
   try {
-    if (!(await $.command.list()).some(c => c.name === KEEPWARM)) return null
+    if (!(await hasCommand($, KEEPWARM))) return null
     return (await $.store.get(KEEP_KEY)) === true
   } catch {
     return null
   }
 }
 
+/** A slash command, fired and not awaited: one run from inside a hook the turn waits on can hang. */
+const fire = ($: EngineInterface, command: string, args: string): void => {
+  void Promise.resolve($.command.run({ command, args })).catch(() => {})
+}
+
+/** The running subagents as the band names them: "Explore 4, sonnet-coder 12", kind and requests made. */
+export const crewText = (running: Worker[]): string => {
+  const s = running.map(w => `${w.type} ${w.steps}`).join(', ')
+  return s.length > CREW_MAX ? s.slice(0, CREW_MAX - 1) + '…' : s
+}
+
 /** Saves the switch and tells cache-tax: always keeps every session warm, off stops it for good. */
 const setKeep = async ($: EngineInterface, isOn: boolean): Promise<void> => {
   await $.store.set(KEEP_KEY, isOn)
   $.ui.invalidate('ui.render')
-  // Not awaited: a command run from inside a hook the turn waits on can hang.
-  void Promise.resolve($.command.run({ command: KEEPWARM, args: isOn ? 'always' : 'off' })).catch(() => {})
+  fire($, KEEPWARM, isOn ? 'always' : 'off')
 }
 
 export const register: Register = on => {
@@ -248,16 +277,45 @@ export const register: Register = on => {
       if (e.index === 0) {
         await update($, turn, () => ({ startedAt: now, steps: 1 }))
         await update($, progress, p => (p && p.isFinished ? null : p))
+        await update($, crew, list => list.filter(w => !w.isDone))
+        // The turn the wrap-up asked for has begun: its end is the conversation's.
+        await update($, ending, s => (s === 'asked' ? 'running' : s))
       } else {
         await update($, turn, t => (t ? { ...t, steps: t.steps + 1 } : { startedAt: now, steps: 1 }))
       }
+    } else {
+      // A subagent's request. One the band never saw start still gets a place.
+      const id = e.agentId
+      await update($, crew, list =>
+        list.some(w => w.id === id)
+          ? list.map(w => (w.id === id ? { ...w, steps: w.steps + 1, isDone: false } : w))
+          : [...list, { id, type: 'agent', steps: 1, isDone: false }].slice(-50),
+      )
     }
     yield* next(e)
   })
 
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    if (started.deny !== undefined) return started
+    const id = started.agentId ?? e.tool_use_id
+    const type = String(e.subagentType || 'agent')
+    await update($, crew, list => [...list.filter(w => w.id !== id), { id, type, steps: 0, isDone: false }].slice(-50))
+    return started
+  })
+
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId) return r
+    if (e.agentId) {
+      const id = e.agentId
+      await update($, crew, list => list.map(w => (w.id === id ? { ...w, isDone: true } : w)))
+      return r
+    }
+    if ((await read($, ending)) === 'running') {
+      await update($, ending, () => null)
+      // The debrief is in: stop holding this conversation's cache. The switch stays on for the next one.
+      if ((await keepState($)) === true) $.clock.after(WRAP_DELAY_MS, () => fire($, KEEPWARM, WRAP_WINDOW))
+    }
     const now = await $.clock.now()
     const c = await read($, cache)
     // turn.step stamps the exact request time; when no step of this turn did, the turn's end is the floor.
@@ -284,10 +342,28 @@ export const register: Register = on => {
         <Button key="keep-warm" label={keep ? 'Keep warm: on' : 'Keep warm: off'} onPress={() => setKeep($, !keep)} />
       </Box>
     )
+    // Ends the conversation: runs the debrief, then lets go of this conversation's cache.
+    const wrapping = await read($, ending)
+    const wrapButton = (await hasCommand($, DEBRIEF)) ? (
+      <Box key="wrap" flexShrink={0} alignItems="flex-start" marginLeft={1}>
+        <Button
+          key="wrap-up"
+          label={wrapping ? 'Wrapping up…' : 'Wrap up'}
+          onPress={async () => {
+            if ((await read($, ending)) !== null) return
+            await update($, ending, () => 'asked' as const)
+            fire($, DEBRIEF, '')
+          }}
+        />
+      </Box>
+    ) : null
+    const buttons = [keepButton, wrapButton]
     const grow = <Box key="grow" flexGrow={1} />
 
     const columns = e.props.bodyColumns ?? e.viewport?.columns ?? 100
     const kind = kindOf(columns)
+    const running = (await read($, crew)).filter(w => !w.isDone)
+    const crewWords = running.length ? ` ×${running.length} ${crewText(running)}` : ''
 
     // Where the request is: Robo on the bar when there is a list or a report to measure
     // against, Robo pacing while a turn works with neither, nothing when idle.
@@ -296,12 +372,30 @@ export const register: Register = on => {
     const pacing = !walking && e.props.isWorking ? await read($, turn) : null
     const said = walking ? labelOf(walking) : null
     const note = said && said.note.length > NOTE_MAX ? said.note.slice(0, NOTE_MAX - 1) + '…' : (said?.note ?? '')
-    const words = walking ? ` ${said!.count}${note ? ` · ${note}` : ''}` : pacing ? ` ${pulseText(pacing, now)}` : ''
-    /** The bar and its words, the drawing `px` wide; null when there is nothing to show. */
-    const progressOf = (key: string, px: number) => {
-      if (!walking && !pacing) return null
-      const w = Math.round(Math.max(BAR_MIN_PX, Math.min(BAR_MAX_PX, px)))
-      const drawing = !Svg ? (
+    const said2 = walking ? ` ${said!.count}${note ? ` · ${note}` : ''}` : pacing ? ` ${pulseText(pacing, now)}` : ''
+    // The crew's drawing is about two columns a head; its words follow.
+    const words = said2 + (running.length ? ' '.repeat(Math.min(CREW_SHOWN, running.length) * 2 + 2) + crewWords : '')
+    const crewBits = !running.length
+      ? []
+      : [
+          Svg ? (
+            <Svg
+              key="crew"
+              source={crewSvg(Math.min(CREW_SHOWN, running.length)).source}
+              alt={`${running.length} ${running.length === 1 ? 'subagent' : 'subagents'} working`}
+              width={crewSvg(Math.min(CREW_SHOWN, running.length)).w}
+              height={BAR_H}
+              isInteractive
+            />
+          ) : null,
+          <Text key="crew-count" color={TEXT} bold>{` ×${running.length}`}</Text>,
+          <Text key="crew-names" color={MUTED}>{` ${crewText(running)}`}</Text>,
+        ]
+    /** The bar, its words and the crew, the bar's drawing at most `max` wide; null when there is nothing to show. */
+    const progressOf = (key: string, px: number, max: number) => {
+      if (!walking && !pacing && !running.length) return null
+      const w = Math.round(Math.max(BAR_MIN_PX, Math.min(max, px)))
+      const drawing = !walking && !pacing ? null : !Svg ? (
         walking ? <Text key="bar" color={ORANGE}>{barText(walking, kind === 'tight' ? TIGHT_CELLS : CELLS)}</Text> : null
       ) : walking ? (
         <Svg
@@ -320,12 +414,15 @@ export const register: Register = on => {
           {drawing}
           {walking ? <Text key="count" color={TEXT} bold>{` ${said!.count}`}</Text> : null}
           {walking && note ? <Text key="note" color={MUTED}>{` · ${note}`}</Text> : null}
-          {pacing ? <Text key="pulse" color={MUTED}>{words}</Text> : null}
+          {pacing ? <Text key="pulse" color={MUTED}>{said2}</Text> : null}
+          {crewBits.length && (walking || pacing) ? <Text key="crew-gap">{'  '}</Text> : null}
+          {crewBits}
         </Box>
       )
     }
+    // On a row of its own the bar takes the width the words leave.
     const rowPx = bandPx(columns) - 40 - words.length * COL_PX
-    const progressRow = progressOf('progress-row', rowPx)
+    const progressRow = progressOf('progress-row', rowPx, rowPx)
 
     if (list.length === 0 && !view) {
       return (
@@ -333,7 +430,7 @@ export const register: Register = on => {
           <Box flexDirection="row" paddingX={1}>
             <Text color={MUTED}>USAGE · waiting for the first reply</Text>
             {grow}
-            {keepButton}
+            {buttons}
           </Box>
           {progressRow}
         </Box>
@@ -405,7 +502,7 @@ export const register: Register = on => {
             {label}
             {usage}
             {grow}
-            {keepButton}
+            {buttons}
           </Box>
           {progressRow}
         </Box>
@@ -456,9 +553,10 @@ export const register: Register = on => {
       (open ? 0 : 12 + (cold ? view.idle.length + 9 : 9)) +
       (Svg ? 5 : 0) +
       (keep === null ? 0 : 17) +
+      (wrapButton ? 15 : 0) +
       2
     const freeCols = columns - usedCols - words.length
-    const progressInline = isWide && freeCols >= INLINE_MIN_COLS ? progressOf('progress', freeCols * COL_PX) : null
+    const progressInline = isWide && freeCols >= INLINE_MIN_COLS ? progressOf('progress', freeCols * COL_PX, BAR_MAX_PX) : null
 
     let rows
     if (kind === 'wide') {
@@ -475,7 +573,7 @@ export const register: Register = on => {
           {progressInline}
           {grow}
           {button}
-          {keepButton}
+          {buttons}
         </Box>
       )
     } else if (kind === 'stacked') {
@@ -498,7 +596,7 @@ export const register: Register = on => {
           )}
           {grow}
           {button}
-          {keepButton}
+          {buttons}
         </Box>
       )
     } else {
@@ -513,7 +611,7 @@ export const register: Register = on => {
           {summary}
           {grow}
           {button}
-          {keepButton}
+          {buttons}
         </Box>,
       ]
     }

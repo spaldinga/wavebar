@@ -6,7 +6,9 @@ import type { Progress, Step, StepStatus, Turn } from '../types'
 
 /** The task-list tools the band reads. Their calls pass through untouched. */
 export const PLAN_TOOL = 'mcp__ccd_turn__update_plan'
-export const LIST_TOOLS = [PLAN_TOOL, 'TodoWrite', 'TaskCreate', 'TaskUpdate'] as const
+/** The desktop app's end-of-turn call, which checks off whatever is left of the plan. */
+export const WRAP_TOOL = 'mcp__ccd_turn__wrap_up'
+export const LIST_TOOLS = [PLAN_TOOL, WRAP_TOOL, 'TodoWrite', 'TaskCreate', 'TaskUpdate'] as const
 /** This mod's own tool, as the model names it. */
 export const REPORT_TOOL = 'mcp__ribbon__progress'
 
@@ -76,6 +78,7 @@ const taskUpdate = (prev: Step[], input: Record<string, unknown>): Step[] => {
 export const afterListCall = (prev: Progress | null, tool: string, input: Record<string, unknown>): Progress | null => {
   const steps = prev?.steps ?? []
   if (tool === PLAN_TOOL) return fromSteps(planCall(steps, input))
+  if (tool === WRAP_TOOL) return prev && steps.length ? fromSteps(steps.map(s => ({ ...s, status: 'completed' as const }))) : prev
   if (tool === 'TodoWrite') {
     const todos = stepsOf(input.todos, 'content')
     return todos ? fromSteps(todos) : prev

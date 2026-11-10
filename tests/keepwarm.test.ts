@@ -204,3 +204,71 @@ test('the band and the card paint no background of their own', async ($, on) => 
   expect(tree).not.toContain('backgroundColor')
   await band.unmount()
 })
+
+test('Wrap up runs the debrief, then lets this conversation go cold while the switch stays on', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { store, ran } = engine(on, { keep: true, commands: ['keepwarm', 'cache-tax', 'debrief'] })
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage: null }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+  })
+  await seed($, 18)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await band.find({ key: 'wrap-up' }))?.props.label).toBe('Wrap up')
+
+  await band.press({ key: 'wrap-up' })
+  expect(ran).toEqual(['debrief'])
+  expect((await band.find({ key: 'wrap-up' }))?.props.label).toBe('Wrapping up…')
+  // A second press while it runs asks for nothing more.
+  await band.press({ key: 'wrap-up' })
+  expect(ran).toEqual(['debrief'])
+
+  // The debrief's own turn starts and ends; only then is the cache let go.
+  for await (const c of $.turn.step({ turnId: 'T9', index: 0, model: 'claude-opus-5-5', messageCount: 4 })) void c
+  await clock.advance(5000)
+  expect(ran).toEqual(['debrief'])
+  await ($.turn.complete as (e: unknown) => Promise<unknown>)({ reason: 'answer', answer: 'ok', usage: null, durationMs: 1000 })
+  await clock.advance(5000)
+  expect(ran).toEqual(['debrief', 'keepwarm 1m'])
+  expect(store.get('keep')).toBe(true)
+  expect((await band.find({ key: 'wrap-up' }))?.props.label).toBe('Wrap up')
+  await band.unmount()
+})
+
+test('a turn already running when Wrap up is pressed does not end the conversation early', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { ran } = engine(on, { keep: true, commands: ['keepwarm', 'debrief'] })
+  await seed($, 18)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'wrap-up' })
+  await ($.turn.complete as (e: unknown) => Promise<unknown>)({ reason: 'answer', answer: 'ok', usage: null, durationMs: 1000 })
+  await clock.advance(5000)
+  expect(ran).toEqual(['debrief'])
+  await band.unmount()
+})
+
+test('with keep-warm off, Wrap up only runs the debrief; without the debrief skill there is no button', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { ran } = engine(on, { keep: false, commands: ['keepwarm', 'debrief'] })
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage: null }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+  })
+  await seed($, 18)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'wrap-up' })
+  for await (const c of $.turn.step({ turnId: 'T9', index: 0, model: 'claude-opus-5-5', messageCount: 4 })) void c
+  await ($.turn.complete as (e: unknown) => Promise<unknown>)({ reason: 'answer', answer: 'ok', usage: null, durationMs: 1000 })
+  await clock.advance(5000)
+  expect(ran).toEqual(['debrief'])
+  await band.unmount()
+})
+
+test('without the debrief skill there is no Wrap up button', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  engine(on, { keep: true })
+  await seed($, 18)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await band.find({ key: 'wrap-up' })).toBeUndefined()
+  await band.unmount()
+})
