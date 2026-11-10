@@ -1,7 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CacheFacts, Fold, Window } from '../types'
+import type { CacheFacts, Fold, Progress, Turn, Window } from '../types'
+import { LIST_TOOLS, REPORT_TOOL, afterListCall, afterReport, barText, labelOf, pulseText, ratioOf } from './progress'
+import { BAR_H, paceSvg, walkSvg } from './progress-art'
 import {
   EMPTY, HUE, INK, MUTED, ORANGE, ROBO_SIZE, TEXT, TTL_MIN, TTL_MS, WORD, YELLOW,
   bandPx, cardSvg, chipSvg, costOf, familyOf, fmtIdle, kindOf, mineModel, roboSvg, usd,
@@ -14,7 +16,7 @@ import type { CacheView } from './cache-art'
 //
 // After the first reply it also shows the prompt cache: WARM (red, Robo bobbing)
 // for an hour after the last request, then COLD (blue, Robo frozen) with what the
-// next message costs to re-cache. Hide / Show folds the card; warm starts folded,
+// next message costs to re-cache. The arrow button folds the card; warm starts folded,
 // cold starts open, and a choice holds until the cache flips. Zero token cost:
 // it reads the engine's own figures and draws.
 //
@@ -36,6 +38,17 @@ const FIRST_RUN_DELAY_MS = 3000
 const windows = atom({ plugin: 'ribbon', key: 'windows' } as const, [] as Window[])
 const cache = atom({ plugin: 'ribbon', key: 'cache' } as const, null as CacheFacts | null)
 const fold = atom({ plugin: 'ribbon', key: 'fold' } as const, null as Fold | null)
+const progress = atom({ plugin: 'ribbon', key: 'progress' } as const, null as Progress | null)
+const turn = atom({ plugin: 'ribbon', key: 'turn' } as const, null as Turn | null)
+
+/** The step's name beside the bar is cut to this, so the bar keeps its room. */
+const NOTE_MAX = 32
+/** The bar sits in the row's spare room when at least this many columns are free; otherwise it takes a row of its own. */
+const INLINE_MIN_COLS = 18
+const BAR_MIN_PX = 140
+const BAR_MAX_PX = 380
+/** A cautious width for one column of spare room, so the bar never pushes the buttons off the row. */
+const COL_PX = 8
 
 const NAMES: Record<string, string> = { seven_day: '7D', five_hour: '5H', spend_limit: 'SPEND' }
 const ORDER: Record<string, number> = { seven_day: 0, five_hour: 1 }
@@ -137,7 +150,43 @@ export const register: Register = on => {
         if ((await keepState($)) !== null) await setKeep($, true)
       } catch { /* a band that cannot read its switch still draws */ }
     })
+    // For a request the model keeps no task list for. Listed up front: nobody goes looking for a progress tool.
+    try {
+      await $.tool.register({
+        name: 'progress',
+        description:
+          'Report where you are in a multi-step request to the progress bar above the prompt. ' +
+          'Call it once at the start with `total` (your plan in 3-8 steps), `done: 0` and a `note` naming the step in hand; ' +
+          'again as each step finishes; and with `finished: true` at the end. Fields left out keep their value. ' +
+          'Skip it whenever you keep a task list: the bar reads that by itself. Cheap and silent: it only draws a bar.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            total: { type: 'integer', minimum: 1, description: 'Steps planned; may change if the plan changes.' },
+            done: { type: 'integer', minimum: 0, description: 'Steps finished so far.' },
+            note: { type: 'string', description: 'The step in hand, a few words.' },
+            finished: { type: 'boolean', description: 'True once the request is done.' },
+          },
+        },
+        isDeferred: false,
+      })
+    } catch { /* without the tool the bar still follows the task list */ }
     return next(e)
+  })
+
+  // The task list the main session keeps is its own account of where it is. The call goes on untouched.
+  for (const tool of LIST_TOOLS) {
+    on('tool.call', { tool }, async ($, e, next) => {
+      if (!e.agentId) await update($, progress, p => afterListCall(p, tool, e as unknown as Record<string, unknown>))
+      return next(e)
+    }).catch(($, e, next) => next(e)) // a bar that fails to read a list never holds up the tool
+  }
+
+  on('tool.call', { tool: REPORT_TOOL }, async ($, e) => {
+    // A subagent's steps are not the request's: only the main session moves the bar.
+    if (e.agentId) return { result: 'ignored: only the main session reports progress' }
+    const p = await update($, progress, prev => afterReport(prev, e as unknown as Record<string, unknown>))
+    return { result: p ? `ok: ${labelOf(p).count}` : 'ok' }
   })
 
   // A typed /keepwarm always or off moves the switch too. cache-tax answers the command beneath.
@@ -195,6 +244,13 @@ export const register: Register = on => {
     if (!e.agentId) {
       const now = await $.clock.now()
       await update($, cache, c => ({ lastAt: now, tokens: c?.tokens ?? 0, window: c?.window ?? 0, model: c?.model ?? null }))
+      // A turn's first request starts its clock, and a list finished last turn has had its moment.
+      if (e.index === 0) {
+        await update($, turn, () => ({ startedAt: now, steps: 1 }))
+        await update($, progress, p => (p && p.isFinished ? null : p))
+      } else {
+        await update($, turn, t => (t ? { ...t, steps: t.steps + 1 } : { startedAt: now, steps: 1 }))
+      }
     }
     yield* next(e)
   })
@@ -230,18 +286,60 @@ export const register: Register = on => {
     )
     const grow = <Box key="grow" flexGrow={1} />
 
+    const columns = e.props.bodyColumns ?? e.viewport?.columns ?? 100
+    const kind = kindOf(columns)
+
+    // Where the request is: Robo on the bar when there is a list or a report to measure
+    // against, Robo pacing while a turn works with neither, nothing when idle.
+    const prog = await read($, progress)
+    const walking = prog && prog.total > 0 ? prog : null
+    const pacing = !walking && e.props.isWorking ? await read($, turn) : null
+    const said = walking ? labelOf(walking) : null
+    const note = said && said.note.length > NOTE_MAX ? said.note.slice(0, NOTE_MAX - 1) + '…' : (said?.note ?? '')
+    const words = walking ? ` ${said!.count}${note ? ` · ${note}` : ''}` : pacing ? ` ${pulseText(pacing, now)}` : ''
+    /** The bar and its words, the drawing `px` wide; null when there is nothing to show. */
+    const progressOf = (key: string, px: number) => {
+      if (!walking && !pacing) return null
+      const w = Math.round(Math.max(BAR_MIN_PX, Math.min(BAR_MAX_PX, px)))
+      const drawing = !Svg ? (
+        walking ? <Text key="bar" color={ORANGE}>{barText(walking, kind === 'tight' ? TIGHT_CELLS : CELLS)}</Text> : null
+      ) : walking ? (
+        <Svg
+          key="bar"
+          source={walkSvg(ratioOf(walking), walking.total, w, walking.isFinished)}
+          alt={walking.isFinished ? `Progress: all ${walking.total} done` : `Progress: ${walking.done} of ${walking.total} done.${note ? ` Now: ${note}` : ''}`}
+          width={w}
+          height={BAR_H}
+          isInteractive
+        />
+      ) : (
+        <Svg key="bar" source={paceSvg(w)} alt="Working" width={w} height={BAR_H} isInteractive />
+      )
+      return (
+        <Box key={key} flexDirection="row" flexShrink={0} alignItems="center" paddingX={key === 'progress-row' ? 1 : 0}>
+          {drawing}
+          {walking ? <Text key="count" color={TEXT} bold>{` ${said!.count}`}</Text> : null}
+          {walking && note ? <Text key="note" color={MUTED}>{` · ${note}`}</Text> : null}
+          {pacing ? <Text key="pulse" color={MUTED}>{words}</Text> : null}
+        </Box>
+      )
+    }
+    const rowPx = bandPx(columns) - 40 - words.length * COL_PX
+    const progressRow = progressOf('progress-row', rowPx)
+
     if (list.length === 0 && !view) {
       return (
-        <Box flexDirection="row" paddingX={1}>
-          <Text color={MUTED}>USAGE · waiting for the first reply</Text>
-          {grow}
-          {keepButton}
+        <Box flexDirection="column">
+          <Box flexDirection="row" paddingX={1}>
+            <Text color={MUTED}>USAGE · waiting for the first reply</Text>
+            {grow}
+            {keepButton}
+          </Box>
+          {progressRow}
         </Box>
       )
     }
 
-    const columns = e.props.bodyColumns ?? e.viewport?.columns ?? 100
-    const kind = kindOf(columns)
     const isWide = kind === 'wide'
     const cells = kind === 'tight' ? TIGHT_CELLS : CELLS
 
@@ -302,11 +400,14 @@ export const register: Register = on => {
     // Before the first reply there is no cache to show: today's band, as it was.
     if (!view) {
       return (
-        <Box flexDirection="row" paddingX={1}>
-          {label}
-          {usage}
-          {grow}
-          {keepButton}
+        <Box flexDirection="column">
+          <Box flexDirection="row" paddingX={1}>
+            {label}
+            {usage}
+            {grow}
+            {keepButton}
+          </Box>
+          {progressRow}
         </Box>
       )
     }
@@ -342,9 +443,23 @@ export const register: Register = on => {
 
     const button = Svg ? (
       <Box key="fold" flexShrink={0} alignItems="flex-start">
-        <Button key="cache-fold" label={open ? 'Hide' : 'Show'} onPress={toggle} />
+        <Button key="cache-fold" label={open ? '▴' : '▾'} onPress={toggle} />
       </Box>
     ) : null
+    // The wide row's spare room, counted in columns from what the row says: the bar goes there when it fits.
+    const usedCols =
+      7 +
+      list.reduce((n, w) => {
+        const p = parts(w)
+        return n + p.name.length + 1 + cells + ` ${p.left}% left`.length + (p.left < LOW_AT ? 4 : 0) + (p.reset ? 3 + p.reset.length : 0) + 3
+      }, 0) +
+      (open ? 0 : 12 + (cold ? view.idle.length + 9 : 9)) +
+      (Svg ? 5 : 0) +
+      (keep === null ? 0 : 17) +
+      2
+    const freeCols = columns - usedCols - words.length
+    const progressInline = isWide && freeCols >= INLINE_MIN_COLS ? progressOf('progress', freeCols * COL_PX) : null
+
     let rows
     if (kind === 'wide') {
       rows = (
@@ -357,6 +472,7 @@ export const register: Register = on => {
               {summary}
             </Box>
           )}
+          {progressInline}
           {grow}
           {button}
           {keepButton}
@@ -415,6 +531,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {rows}
+        {progressInline ? null : progressRow}
         {card}
       </Box>
     )
