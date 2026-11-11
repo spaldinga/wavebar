@@ -81,6 +81,8 @@ export const paceSvg = (W: number): string => {
   const span = Math.max(0, x1 - x0 - PACE_W)
   const ease = 'calcMode="spline" keyTimes="0;0.5;1" keySplines=".45 0 .55 1;.45 0 .55 1"'
   const dur = 'dur="3.2s" repeatCount="indefinite"'
+  /** The surfer's centre, which the mirror turns about. */
+  const cx = x0 + PACE_W / 2
   return svgDoc(
     W,
     BAR_H,
@@ -89,8 +91,11 @@ export const paceSvg = (W: number): string => {
       `<rect x="${x0}" y="${TRACK_Y}" width="${PACE_W}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="url(#way)">` +
       `<animate attributeName="x" values="${x0};${x0 + span};${x0}" ${dur} ${ease}/></rect>` +
       `<g><animateTransform attributeName="transform" type="translate" values="0 0;${span} 0;0 0" ${dur} ${ease}/>` +
+      // Mirrored about its own centre for the return leg: the flip lands at the right-hand end (half time) and back at the left.
+      `<g transform="translate(${cx} 0)"><g><animateTransform attributeName="transform" type="scale" values="1 1;-1 1;1 1" keyTimes="0;0.5;1" calcMode="discrete" ${dur}/>` +
+      `<g transform="translate(${-cx} 0)">` +
       surfer(x0 + PACE_W / 2 - BOARD_W / 2) +
-      '</g>',
+      '</g></g></g></g>',
     false,
   )
 }

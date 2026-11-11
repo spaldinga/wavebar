@@ -6,7 +6,7 @@ import { resetHold } from '../hooks/register'
 
 const NOW = Date.parse('2098-12-31T22:00:00Z')
 const PROPS = { hasSurvey: false, isWorking: true, maxRows: 12, bodyColumns: 120, scroll: { offset: 0, bodyRows: 12 }, view: {} } as const
-const BAND = { plugin: 'ribbon', surface: 'desktop', component: 'AbovePrompt', props: PROPS } as const
+const BAND = { plugin: 'wavebar', surface: 'desktop', component: 'AbovePrompt', props: PROPS } as const
 
 type T$ = Parameters<Parameters<typeof test>[1]>[0]
 type Clock = ReturnType<typeof mock.clock>
@@ -47,9 +47,9 @@ test('the folder the line moved to is where it is measured, in Bash and in Power
 })
 
 /** The engine beneath: git answers from a table, and a wait moves the clock. */
-const engine = (on: On, clock: Clock, opts: { git?: Record<string, string>; waits?: boolean; waitMs?: number } = {}) => {
+const engine = (on: On, clock: Clock, opts: { git?: Record<string, string>; waits?: boolean; waitMs?: number; hold?: boolean } = {}) => {
   resetHold()
-  mock.store(on, { keep: true })
+  mock.store(on, opts.hold === undefined ? { keep: true } : { keep: true, hold: opts.hold })
   const ran: string[] = []
   const logs: string[] = []
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -113,7 +113,7 @@ test('Cancel refuses the command and tells Claude why', async ($, on) => {
   expect(await band.find({ text: 'Would remove 2 untracked paths' })).toBeDefined()
   await band.press({ key: 'held-cancel' })
   expect(await call).toMatchObject({
-    deny: 'ribbon held this command and did not run it: the user pressed Cancel. It would have: remove 2 untracked paths. Do not retry it unless the user asks you to.',
+    deny: 'wavebar held this command and did not run it: the user pressed Cancel. It would have: remove 2 untracked paths. Do not retry it unless the user asks you to.',
   })
   await band.unmount()
 })
@@ -135,7 +135,7 @@ test('no answer within ten minutes refuses the command', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   engine(on, clock, { git: DIRTY, waitMs: 4 * 60 * 1000 })
   expect(await $.tool.call({ tool: 'Bash', command: 'git reset --hard' } as never)).toMatchObject({
-    deny: 'ribbon held this command and did not run it: no answer within 10 minutes. It would have: discard uncommitted changes in 2 files. Do not retry it unless the user asks you to.',
+    deny: 'wavebar held this command and did not run it: no answer within 10 minutes. It would have: discard uncommitted changes in 2 files. Do not retry it unless the user asks you to.',
   })
 })
 
@@ -151,5 +151,14 @@ test('a command that is not risky is never held or measured', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const { ran } = engine(on, clock)
   expect(await $.tool.call({ tool: 'Bash', command: 'git status && dotnet test' } as never)).toMatchObject({ result: 'ran' })
+  expect(ran).toEqual([])
+})
+
+test('with the hold switched off in the store, a risky command goes straight through', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { ran } = engine(on, clock, { git: DIRTY, hold: false })
+  for (const tool of ['Bash', 'PowerShell'] as const) {
+    expect(await $.tool.call({ tool, command: 'git reset --hard' } as never)).toMatchObject({ result: 'ran' })
+  }
   expect(ran).toEqual([])
 })

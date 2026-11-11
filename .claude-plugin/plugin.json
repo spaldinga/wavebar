@@ -1,11 +1,11 @@
 {
-  "name": "ribbon",
-  "version": "1.0.0",
-  "description": "A slim band above the prompt: how much of your 5-hour and 7-day usage is left, when each resets, and whether the prompt cache is warm or cold with what the next message costs.",
-  "author": { "name": "Jay E", "url": "https://robonuggets.com" },
-  "homepage": "https://github.com/robonuggets/ribbon",
-  "repository": "https://github.com/robonuggets/ribbon",
+  "name": "wavebar",
+  "version": "1.1.0",
+  "description": "A band above the prompt: usage left, prompt cache warm or cold, a progress line a robot surfs, running subagents, the conversation's cost, a keep-warm switch for cache-tax, and a hold for risky git commands.",
+  "author": { "name": "Spalding Alexander" },
+  "homepage": "https://github.com/spaldinga/wavebar",
+  "repository": "https://github.com/spaldinga/wavebar",
   "license": "MIT",
-  "keywords": ["usage", "rate-limit", "prompt-cache", "cost", "status", "mod", "claude-code"],
+  "keywords": ["usage", "rate-limit", "prompt-cache", "cost", "progress", "subagents", "status", "mod", "claude-code"],
   "types": "./types/index.d.ts"
 }

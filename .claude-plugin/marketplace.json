@@ -1,12 +1,12 @@
 {
-  "name": "local-mods",
-  "description": "Local copies of mods with my own changes.",
-  "owner": { "name": "Jay E", "url": "https://robonuggets.com" },
+  "name": "wavebar",
+  "description": "wavebar, a band above the Claude Code prompt.",
+  "owner": { "name": "Spalding Alexander" },
   "plugins": [
     {
-      "name": "ribbon",
+      "name": "wavebar",
       "source": "./",
-      "description": "A slim band above the prompt: usage left, reset times, and whether the prompt cache is warm or cold with what the next message costs."
+      "description": "A band above the prompt: usage left, cache warm or cold, progress, subagents, cost, keep-warm switch, and a hold for risky git commands."
     }
   ]
 }

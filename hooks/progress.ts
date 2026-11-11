@@ -10,7 +10,7 @@ export const PLAN_TOOL = 'mcp__ccd_turn__update_plan'
 export const WRAP_TOOL = 'mcp__ccd_turn__wrap_up'
 export const LIST_TOOLS = [PLAN_TOOL, WRAP_TOOL, 'TodoWrite', 'TaskCreate', 'TaskUpdate'] as const
 /** This mod's own tool, as the model names it. */
-export const REPORT_TOOL = 'mcp__ribbon__progress'
+export const REPORT_TOOL = 'mcp__wavebar__progress'
 
 const MAX_STEPS = 60
 const MAX_TITLE = 80

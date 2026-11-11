@@ -1,10 +1,17 @@
 import type { EngineInterface } from 'claude-code'
 
 // Hold and show: a git command that throws work away is held before it runs, and
-// the band shows what it would lose, with Proceed and Cancel. The idea, and the way
-// each command is measured, follow Blast Radius (Anthropic, claude-code-playground,
-// Apache-2.0); this version reads Bash and PowerShell command lines alike and asks
-// only git, so it needs no Unix tools.
+// the band shows what it would lose, with Proceed and Cancel.
+//
+// Portions of this file are adapted from Blast Radius
+// (https://github.com/anthropics/claude-code-playground, claude-code/mods/blast-radius),
+// Copyright 2026 Anthropic PBC, licensed under the Apache License, Version 2.0; a copy
+// of that licence is in LICENSES/Apache-2.0.txt. Adapted: the idea of holding a call
+// until the person answers, and how reset, checkout, clean and force push are measured
+// (measureClean, measureDiscard, measurePush and their report texts).
+// Changed here: rewritten in TypeScript; reads Bash and PowerShell command lines alike;
+// git commands only (no rm, no migrations); measures with git alone, in the folder the
+// line names, so it needs no bash, find or du; a failed hold lets the command through.
 //
 // It reads the command's text and is a second look, not a lock: a command inside
 // `bash -c "..."`, a script or an alias is not seen. Permission rules stay the guard.
@@ -155,4 +162,4 @@ export async function measure($: EngineInterface, risk: Risk, cwd: string): Prom
 
 /** The line Claude reads when a held command is refused. */
 export const refusal = (why: string, summary: string): string =>
-  `ribbon held this command and did not run it: ${why}. It would have: ${summary}. Do not retry it unless the user asks you to.`
+  `wavebar held this command and did not run it: ${why}. It would have: ${summary}. Do not retry it unless the user asks you to.`

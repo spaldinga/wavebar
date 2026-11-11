@@ -25,7 +25,7 @@ test('the band shows percent left for each window once a reading lands', async (
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const band = await $.ui.mount({
-      plugin: 'ribbon',
+      plugin: 'wavebar',
       surface,
       component: 'AbovePrompt',
       props: PROPS,
@@ -49,7 +49,7 @@ test('in a narrow band each window stacks, with percent left and reset time on t
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 
   const band = await $.ui.mount({
-    plugin: 'ribbon',
+    plugin: 'wavebar',
     surface: 'desktop',
     component: 'AbovePrompt',
     props: { ...PROPS, bodyColumns: 36 },

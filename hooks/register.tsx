@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CacheFacts, Ending, Fold, Progress, Spend, Turn, Window, Worker } from '../types'
+import type { CacheFacts, Ending, Fold, Progress, Spend, Spent, Turn, Window, Worker } from '../types'
 import { LIST_TOOLS, REPORT_TOOL, afterListCall, afterReport, barText, labelOf, pulseText, ratioOf } from './progress'
 import { BAR_H, crewSvg, paceSvg, walkSvg } from './progress-art'
 import { classify, measure as measureRisk, refusal } from './guard'
@@ -23,7 +23,7 @@ import type { CacheView } from './cache-art'
 // it reads the engine's own figures and draws.
 //
 // With cache-tax installed it also carries that mod's keep-warm switch: one button,
-// on or off for every session, on by default. A keep-warm ping that really read the
+// on or off for every session, off until pressed. A keep-warm ping that really read the
 // cache starts the hour again here too, so the band and cache-tax agree.
 
 const CELLS = 10
@@ -34,22 +34,87 @@ const TICK_MS = 30_000
 /** cache-tax's command, and the key this band remembers the switch under, for every session. */
 const KEEPWARM = 'keepwarm'
 const KEEP_KEY = 'keep'
-/** cache-tax registers its command in its own session.start, which may run after this one. */
-const FIRST_RUN_DELAY_MS = 3000
+/** The mod's own settings command: one name, so a rename touches one line. */
+const SETTINGS = 'wavebar'
+const WRAP_KEY = 'wrapUp'
+const HOLD_KEY = 'hold'
+/** The cost per session lives in the store under this prefix; entries not written for this long are dropped at session start. */
+const SPEND_PREFIX = 'spend:'
+const SPEND_KEEP_MS = 30 * 24 * 60 * 60 * 1000
 
-const windows = atom({ plugin: 'ribbon', key: 'windows' } as const, [] as Window[])
-const cache = atom({ plugin: 'ribbon', key: 'cache' } as const, null as CacheFacts | null)
-const fold = atom({ plugin: 'ribbon', key: 'fold' } as const, null as Fold | null)
-const progress = atom({ plugin: 'ribbon', key: 'progress' } as const, null as Progress | null)
-const turn = atom({ plugin: 'ribbon', key: 'turn' } as const, null as Turn | null)
-const crew = atom({ plugin: 'ribbon', key: 'crew' } as const, [] as Worker[])
-const ending = atom({ plugin: 'ribbon', key: 'ending' } as const, null as Ending)
-const spend = atom({ plugin: 'ribbon', key: 'spend' } as const, { main: 0, subs: 0 } as Spend)
+const windows = atom({ plugin: 'wavebar', key: 'windows' } as const, [] as Window[])
+const cache = atom({ plugin: 'wavebar', key: 'cache' } as const, null as CacheFacts | null)
+const fold = atom({ plugin: 'wavebar', key: 'fold' } as const, null as Fold | null)
+const progress = atom({ plugin: 'wavebar', key: 'progress' } as const, null as Progress | null)
+const turn = atom({ plugin: 'wavebar', key: 'turn' } as const, null as Turn | null)
+const crew = atom({ plugin: 'wavebar', key: 'crew' } as const, [] as Worker[])
+const ending = atom({ plugin: 'wavebar', key: 'ending' } as const, null as Ending)
+/** Subagent cost since the last main turn finished: it joins the next main turn's `last`. */
+const subsSince = atom({ plugin: 'wavebar', key: 'subsSince' } as const, 0)
 
 /** The conversation's cost as one line for the transcript, so a debrief can quote it instead of leaving cost empty. */
 export const spendLine = (s: Spend): string =>
   `this conversation has cost about ${usd(s.main + s.subs)} so far (main session ${usd(s.main)}, subagents ${usd(s.subs)}). ` +
   'An estimate from token counts at list prices, since this session started or was last resumed; not a bill.'
+
+/** This session's saved cost, or null when there is none or the id or the store cannot be read. */
+const readSpend = async ($: EngineInterface): Promise<Spent | null> => {
+  try {
+    const s = (await $.store.get(SPEND_PREFIX + (await $.session.id()))) as Partial<Spent> | null | undefined
+    if (!s || typeof s.main !== 'number' || typeof s.subs !== 'number') return null
+    return { main: s.main, subs: s.subs, last: typeof s.last === 'number' ? s.last : 0, at: typeof s.at === 'number' ? s.at : 0 }
+  } catch {
+    return null
+  }
+}
+
+/** Adds a finished turn's cost to this session's saved figures. A failing store or id loses the figure, never the turn. */
+const addSpend = async ($: EngineInterface, paid: number, isMain: boolean): Promise<void> => {
+  try {
+    const key = SPEND_PREFIX + (await $.session.id())
+    const was = await readSpend($)
+    const next: Spent = { main: was?.main ?? 0, subs: was?.subs ?? 0, last: was?.last ?? 0, at: await $.clock.now() }
+    if (isMain) {
+      next.main += paid
+      next.last = paid + (await read($, subsSince))
+      await update($, subsSince, () => 0)
+    } else {
+      next.subs += paid
+      await update($, subsSince, n => n + paid)
+    }
+    await $.store.set(key, next)
+    $.ui.invalidate('ui.render')
+  } catch { /* the band shows no cost; the turn goes on */ }
+}
+
+/** A switch kept in the store: its saved value, or `fallback` when none was saved or the store cannot be read. */
+const switchOf = async ($: EngineInterface, key: string, fallback: boolean): Promise<boolean> => {
+  try {
+    const v = await $.store.get(key)
+    return typeof v === 'boolean' ? v : fallback
+  } catch {
+    return fallback
+  }
+}
+
+/** The settings command's answer to `args`; a change is saved and the band redrawn. */
+const settingsAnswer = async ($: EngineInterface, args: string): Promise<string> => {
+  const [name, value, ...rest] = args.trim().split(/\s+/)
+  const usage = `Usage: /${SETTINGS} [status] | wrapup on|off | hold on|off`
+  const key = name === 'wrapup' ? WRAP_KEY : name === 'hold' ? HOLD_KEY : null
+  if (key !== null && rest.length === 0 && (value === 'on' || value === 'off')) {
+    await $.store.set(key, value === 'on')
+    $.ui.invalidate('ui.render')
+    return `${name}: ${value}`
+  }
+  if (name !== '' && name !== 'status') return usage
+  const wrap = await switchOf($, WRAP_KEY, false)
+  const hold = await switchOf($, HOLD_KEY, true)
+  return (
+    `wrapup: ${wrap ? 'on' : 'off'} - a Wrap up button that runs the debrief skill and lets this conversation go cold\n` +
+    `hold: ${hold ? 'on' : 'off'} - holds risky git commands (hard reset, clean, force push) until you answer in the band`
+  )
+}
 
 /** The skill a wrap-up runs, and the window it leaves keep-warm: too short for a ping, so this conversation stops being held. */
 const DEBRIEF = 'debrief'
@@ -228,6 +293,8 @@ export const register: Register = on => {
       const command = String(e.command ?? '')
       const risk = classify(command)
       if (risk === null) return next(e)
+      // The hold is on unless /wavebar hold off said otherwise.
+      if (!(await switchOf($, HOLD_KEY, true))) return next(e)
       const interrupted = { deny: refusal('the turn was interrupted', risk.label) }
       // `held` is claimed with no await between the check and the claim, so two waiting calls can't both get through.
       while (held !== null) {
@@ -267,13 +334,23 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await pull($)
     $.clock.every(TICK_MS, () => $.ui.invalidate('ui.render'))
-    // The first session ever: keep-warm starts on. After that the saved choice stands.
-    $.clock.after(FIRST_RUN_DELAY_MS, async () => {
-      try {
-        if (typeof (await $.store.get(KEEP_KEY)) === 'boolean') return
-        if ((await keepState($)) !== null) await setKeep($, true)
-      } catch { /* a band that cannot read its switch still draws */ }
-    })
+    try {
+      await $.command.register({
+        name: SETTINGS,
+        description: "Settings for the band above the prompt: the Wrap up button and the hold for risky git commands",
+        argumentHint: '[status] | wrapup on|off | hold on|off',
+        immediate: true,
+      })
+    } catch { /* without the command the settings keep their defaults */ }
+    // Saved costs of sessions not touched for a month are dropped.
+    try {
+      const cutoff = (await $.clock.now()) - SPEND_KEEP_MS
+      for (const key of await $.store.keys()) {
+        if (!key.startsWith(SPEND_PREFIX)) continue
+        const s = (await $.store.get(key)) as Partial<Spent> | null | undefined
+        if (s && typeof s.at === 'number' && s.at < cutoff) await $.store.delete(key)
+      }
+    } catch { /* an entry that stays is only a few bytes */ }
     // For a request the model keeps no task list for. Listed up front: nobody goes looking for a progress tool.
     try {
       await $.tool.register({
@@ -312,6 +389,8 @@ export const register: Register = on => {
     const p = await update($, progress, prev => afterReport(prev, e as unknown as Record<string, unknown>))
     return { result: p ? `ok: ${labelOf(p).count}` : 'ok' }
   })
+
+  on('command.run', { command: SETTINGS }, async ($, e) => ({ text: await settingsAnswer($, String(e.args ?? '')) }))
 
   // A typed /keepwarm always or off moves the switch too. cache-tax answers the command beneath.
   on('command.run', { command: KEEPWARM }, async ($, e, next) => {
@@ -406,10 +485,10 @@ export const register: Register = on => {
     if (e.agentId) {
       const id = e.agentId
       await update($, crew, list => list.map(w => (w.id === id ? { ...w, isDone: true } : w)))
-      if (paid > 0) await update($, spend, s => ({ ...s, subs: s.subs + paid }))
+      if (paid > 0) await addSpend($, paid, false)
       return r
     }
-    if (paid > 0) await update($, spend, s => ({ ...s, main: s.main + paid }))
+    if (paid > 0) await addSpend($, paid, true)
     if ((await read($, ending)) === 'running') {
       await update($, ending, () => null)
       // The debrief is in: stop holding this conversation's cache. The switch stays on for the next one.
@@ -469,7 +548,7 @@ export const register: Register = on => {
     )
     // Ends the conversation: runs the debrief, then lets go of this conversation's cache.
     const wrapping = await read($, ending)
-    const wrapButton = (await hasCommand($, DEBRIEF)) ? (
+    const wrapButton = (await switchOf($, WRAP_KEY, false)) && (await hasCommand($, DEBRIEF)) ? (
       <Box key="wrap" flexShrink={0} alignItems="flex-start" marginLeft={1}>
         <Button
           key="wrap-up"
@@ -478,8 +557,8 @@ export const register: Register = on => {
             if ((await read($, ending)) !== null) return
             await update($, ending, () => 'asked' as const)
             // Into the transcript first, so the debrief has the figure to quote.
-            const s = await read($, spend)
-            if (s.main + s.subs > 0) void Promise.resolve($.ui.log(spendLine(s))).catch(() => {})
+            const s = await readSpend($)
+            if (s && s.main + s.subs > 0) void Promise.resolve($.ui.log(spendLine(s))).catch(() => {})
             fire($, DEBRIEF, '')
           }}
         />
@@ -552,11 +631,25 @@ export const register: Register = on => {
     const rowPx = bandPx(columns) - 40 - words.length * COL_PX
     const progressRow = progressOf('progress-row', rowPx, rowPx)
 
+    // What the conversation has cost so far, read from the store: it survives a restart.
+    const isWide = kind === 'wide'
+    const paid = await readSpend($)
+    const total = paid ? paid.main + paid.subs : 0
+    const lastText = paid && paid.last > 0 ? usd(paid.last) : null
+    const spendBox = total <= 0 ? null : (
+      <Box key="spend" flexDirection={isWide ? 'row' : 'column'} flexShrink={0} marginRight={3}>
+        <Text color={MUTED} bold>{isWide ? 'COST ' : 'COST'}</Text>
+        <Text key="spend-total" color={TEXT} bold>{`≈${usd(total)}`}</Text>
+        {lastText ? <Text key="spend-last" color={MUTED}>{isWide ? ` · last ${lastText}` : `last ${lastText}`}</Text> : null}
+      </Box>
+    )
+
     if (list.length === 0 && !view) {
       return (
         <Box flexDirection="column">
           <Box flexDirection="row" paddingX={1}>
             <Text color={MUTED}>USAGE · waiting for the first reply</Text>
+            {spendBox ? <Box key="wait-spend" marginLeft={2}>{spendBox}</Box> : null}
             {grow}
             {buttons}
           </Box>
@@ -565,7 +658,6 @@ export const register: Register = on => {
       )
     }
 
-    const isWide = kind === 'wide'
     const cells = kind === 'tight' ? TIGHT_CELLS : CELLS
 
     const parts = (w: Window) => {
@@ -616,15 +708,6 @@ export const register: Register = on => {
     const label = (
       <Box key="label" flexShrink={0} marginRight={isWide ? 2 : 3}>
         <Text color={TEXT} bold>USAGE</Text>
-      </Box>
-    )
-    // What the conversation has cost so far, once a turn has reported its usage.
-    const paid = await read($, spend)
-    const total = paid.main + paid.subs
-    const spendBox = total <= 0 ? null : (
-      <Box key="spend" flexDirection={isWide ? 'row' : 'column'} flexShrink={0} marginRight={3}>
-        <Text color={MUTED} bold>{isWide ? 'COST ' : 'COST'}</Text>
-        <Text key="spend-total" color={TEXT} bold>{`≈${usd(total)}`}</Text>
       </Box>
     )
     const usage = [
@@ -694,7 +777,7 @@ export const register: Register = on => {
       (Svg ? 5 : 0) +
       (keep === null ? 0 : 17) +
       (wrapButton ? 15 : 0) +
-      (spendBox ? 9 + usd(total).length : 0) +
+      (spendBox ? 9 + usd(total).length + (lastText ? 8 + lastText.length : 0) : 0) +
       2
     const freeCols = columns - usedCols - words.length
     const progressInline = isWide && freeCols >= INLINE_MIN_COLS ? progressOf('progress', freeCols * COL_PX, BAR_MAX_PX) : null
