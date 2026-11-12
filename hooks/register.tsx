@@ -55,7 +55,7 @@ const subsSince = atom({ plugin: 'wavebar', key: 'subsSince' } as const, 0)
 /** The conversation's cost as one line for the transcript, so a debrief can quote it instead of leaving cost empty. */
 export const spendLine = (s: Spend): string =>
   `this conversation has cost about ${usd(s.main + s.subs)} so far (main session ${usd(s.main)}, subagents ${usd(s.subs)}). ` +
-  'An estimate from token counts at list prices, since this session started or was last resumed; not a bill.'
+  'An estimate from token counts at list prices; not a bill.'
 
 /** This session's saved cost, or null when there is none or the id or the store cannot be read. */
 const readSpend = async ($: EngineInterface): Promise<Spent | null> => {
@@ -100,12 +100,17 @@ const switchOf = async ($: EngineInterface, key: string, fallback: boolean): Pro
 /** The settings command's answer to `args`; a change is saved and the band redrawn. */
 const settingsAnswer = async ($: EngineInterface, args: string): Promise<string> => {
   const [name, value, ...rest] = args.trim().split(/\s+/)
-  const usage = `Usage: /${SETTINGS} [status] | wrapup on|off | hold on|off`
+  const usage = `Usage: /${SETTINGS} [status] | cost | wrapup on|off | hold on|off`
   const key = name === 'wrapup' ? WRAP_KEY : name === 'hold' ? HOLD_KEY : null
   if (key !== null && rest.length === 0 && (value === 'on' || value === 'off')) {
     await $.store.set(key, value === 'on')
     $.ui.invalidate('ui.render')
     return `${name}: ${value}`
+  }
+  // A command's answer is text the model reads, which a log line is not: this is how the cost reaches a debrief.
+  if (name === 'cost' && value === undefined) {
+    const s = await readSpend($)
+    return s && s.main + s.subs > 0 ? spendLine(s) : 'no cost recorded for this conversation yet'
   }
   if (name !== '' && name !== 'status') return usage
   const wrap = await switchOf($, WRAP_KEY, false)
@@ -338,7 +343,7 @@ export const register: Register = on => {
       await $.command.register({
         name: SETTINGS,
         description: "Settings for the band above the prompt: the Wrap up button and the hold for risky git commands",
-        argumentHint: '[status] | wrapup on|off | hold on|off',
+        argumentHint: '[status] | cost | wrapup on|off | hold on|off',
         immediate: true,
       })
     } catch { /* without the command the settings keep their defaults */ }
@@ -556,9 +561,9 @@ export const register: Register = on => {
           onPress={async () => {
             if ((await read($, ending)) !== null) return
             await update($, ending, () => 'asked' as const)
-            // Into the transcript first, so the debrief has the figure to quote.
+            // The cost first, as a command's answer, so the debrief has the figure to quote.
             const s = await readSpend($)
-            if (s && s.main + s.subs > 0) void Promise.resolve($.ui.log(spendLine(s))).catch(() => {})
+            if (s && s.main + s.subs > 0) fire($, SETTINGS, 'cost')
             fire($, DEBRIEF, '')
           }}
         />

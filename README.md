@@ -77,6 +77,7 @@ Remove it with `/plugin uninstall wavebar@wavebar`.
 
 ```
 /wavebar status        show the settings
+/wavebar cost          print this conversation's cost (Wrap up runs it for the debrief)
 /wavebar wrapup on     show the Wrap up button (default: off)
 /wavebar hold off      stop holding risky git commands (default: on)
 ```

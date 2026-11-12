@@ -317,21 +317,24 @@ test("the band adds up the conversation's cost, the main session's and its subag
   await band.unmount()
 })
 
-test('Wrap up puts the cost in the transcript before the debrief runs', async ($, on) => {
+test('the cost command answers with the line a debrief can quote, and Wrap up still runs the debrief', async ($, on) => {
   mock.clock(on, { now: NOW })
   const { ran } = engine(on, { keep: true, commands: ['keepwarm', 'debrief'], prefill: WRAP })
-  const logs: string[] = []
-  on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
+  const cost = async () => ((await $.command.run({ command: 'wavebar', args: 'cost', ...RUN })) as { text: string }).text
   await seed($, 18)
+  // Nothing spent yet: the command says so rather than printing zeros.
+  expect(await cost()).toBe('no cost recorded for this conversation yet')
   await done($, { usage: USED })
   await done($, { usage: { ...USED, model: 'claude-haiku-5-5' }, agentId: 'sub1' })
+  // A command's answer is what the model reads; a log line is not.
+  expect(await cost()).toBe(
+    'this conversation has cost about $36.50 so far (main session $32.40, subagents $4.10). ' +
+      'An estimate from token counts at list prices; not a bill.',
+  )
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   await band.press({ key: 'wrap-up' })
-  expect(logs).toEqual([
-    'this conversation has cost about $36.50 so far (main session $32.40, subagents $4.10). ' +
-      'An estimate from token counts at list prices, since this session started or was last resumed; not a bill.',
-  ])
-  expect(ran).toEqual(['debrief'])
+  // The cost is asked for first, then the debrief.
+  expect(ran).toEqual(['wavebar cost', 'debrief'])
   await band.unmount()
 })
 
