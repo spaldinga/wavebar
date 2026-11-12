@@ -7,9 +7,14 @@ conversation has cost so far. A small robot surfs the progress line.
 wavebar is a [Claude Code mod](https://code.claude.com/docs). It draws and listens; it never
 calls a model by itself.
 
-<!-- Screenshots: add assets/wavebar-band.png (folded band with the progress bar),
-     assets/wavebar-card.png (cache card open) and assets/wavebar-held.png (a held git command),
-     then replace this comment with the images. -->
+![The wavebar band above the Claude Code prompt: 7-day and 5-hour usage left with reset times, the conversation's cost and the last turn's, the cache marked WARM with 51 minutes left, and the fold, Keep warm and Wrap up buttons](assets/wavebar-band.png)
+
+*The band as it sits above the prompt: usage left, what the conversation has cost, the cache
+state, and the buttons. The progress line, the subagents and a held git command appear in the
+same band while Claude works.*
+
+<!-- Still to add: assets/wavebar-progress.png (the surfer on the progress line),
+     assets/wavebar-card.png (cache card open) and assets/wavebar-held.png (a held git command). -->
 
 ## What it shows
 
